@@ -1035,6 +1035,7 @@ export class EventController {
 		this.#runActive = false;
 		this.#maintenanceActive = false;
 		this.#syncComposerActivity();
+		this.ctx.composer.setSanctuaryActivity("idle");
 	}
 
 	#syncComposerActivity(): void {
@@ -1188,6 +1189,7 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		this.ctx.composer.setSanctuaryActivity("thinking");
 		this.#runEpoch += 1;
 		// A run with no user prompt in it (synthetic-only: `/goal` kickoff,
 		// approved-plan execution) must not measure prompt→yield from an unrelated
@@ -2037,6 +2039,7 @@ export class EventController {
 
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		if (this.#retractedToolCallIds.has(event.toolCallId)) return;
+		this.ctx.composer.setSanctuaryActivity("executing");
 		this.#ensureWorkingLoaderWhileStreaming();
 		this.#updateWorkingMessageFromIntent(event.intent);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
@@ -2266,6 +2269,7 @@ export class EventController {
 		// message_end; consume the completion instead of recreating/updating UI.
 		if (this.#retractedToolCallIds.delete(event.toolCallId)) return;
 		this.#executionStartedCallIds.delete(event.toolCallId);
+		this.ctx.composer.setSanctuaryActivity(this.#executionStartedCallIds.size > 0 ? "executing" : "thinking");
 		this.#showToolReplies(event.toolCallId, event.result.details);
 		// A synthetic aborted/error completion (agent-loop's placeholder for a
 		// never-run call on a terminal error/abort) settles the card in place so a
@@ -2637,6 +2641,7 @@ export class EventController {
 		// not mark that live turn idle.
 		this.#runActive = this.ctx.viewSession.isStreaming;
 		this.#syncComposerActivity();
+		this.ctx.composer.setSanctuaryActivity(this.#runActive ? "thinking" : "complete");
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();

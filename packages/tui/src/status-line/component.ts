@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import * as os from "node:os";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import {
@@ -21,7 +22,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
-import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
+import { adjustHsv, formatBytes, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
 import type {
 	ActiveRepoContext,
 	StatusAccountIdentity as OAuthAccountIdentity,
@@ -30,6 +31,7 @@ import type {
 	StatusLineSession,
 } from "./host";
 import type { Editor } from "../components/editor";
+import type { SanctuarySnapshot } from "../prompt/sanctuary-sidebar";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { sanitizeHookStatusText, sanitizeStatusText } from "../chrome/shared";
 import { getThemeEpoch, theme } from "../theme";
@@ -877,6 +879,44 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	) {
 		this.#settings = host.getSettings();
 		this.#unwatchNativeRendering = onNativeRenderingChange(() => this.#syncActiveWindowRepaint());
+	}
+
+	/** Live, truthful facts used by the optional Sanctuary Observatory panel. */
+	sanctuarySnapshot(): SanctuarySnapshot {
+		const model = this.session.model ?? this.session.state.model;
+		const usage = this.session.getContextUsage();
+		const compactTokens = (tokens: number) =>
+			tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(1)}M` : `${Math.round(tokens / 1_000)}K`;
+		const context = usage
+			? `${compactTokens(usage.tokens)} / ${compactTokens(usage.contextWindow)}${usage.percent === null ? "" : ` · ${usage.percent.toFixed(1)}%`}`
+			: undefined;
+		const window = usage?.contextWindow ?? model?.contextWindow;
+		const boundaries = window ? this.#compactionBoundaries(window) : null;
+		const memoryTotal = os.totalmem();
+		const memoryUsed = memoryTotal - os.freemem();
+		const load = os.loadavg()[0];
+		const tokenRate = this.#getTokensPerSecond();
+		const advisorOverview = this.session.getAdvisorStatusOverview?.();
+		return {
+			model: model?.name || model?.id,
+			project:
+				this.session.sessionManager.getCwd?.().split(/[\\/]/).filter(Boolean).at(-1) ??
+				getProjectDir().split(/[\\/]/).filter(Boolean).at(-1),
+			session: this.session.sessionManager.getSessionName(),
+			tokenRate: tokenRate && tokenRate > 0 ? `${tokenRate.toFixed(1)} tok/s` : undefined,
+			context,
+			compaction: this.session.compactionSpeculation ?? (this.session.autoCompactionEnabled ? "ready" : "manual"),
+			threshold: boundaries
+				? `${Math.round(boundaries.thresholdPercent)}%`
+				: this.session.autoCompactionEnabled
+					? "default"
+					: "off",
+			route: model?.provider === "ollama" ? "OLLAMA · LOCAL" : model?.provider?.toUpperCase(),
+			cpu: Number.isFinite(load) ? `load ${load.toFixed(2)} / 1m` : undefined,
+			ram: `${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}`,
+			gpu: "not exposed",
+			activity: advisorOverview?.advisors.some(advisor => advisor.status === "running") ? "verifying" : undefined,
+		};
 	}
 
 	#gitEnabled(): boolean {

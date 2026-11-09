@@ -459,6 +459,7 @@ import {
 	cfgTuiVimModeDisplay,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
+import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgDefaultThinkingLevel, cfgHideThinkingBlock } from "../session/settings";
@@ -2531,6 +2532,52 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#syncHeaderExtras();
 		this.statusLine.watchBranch(() => this.ui.requestRender());
 		this.composer.setStatusComponent(this.statusLine);
+		this.composer.setSanctuarySidebar(true, () => {
+			const agents = this.#observerRegistry
+				.getSessions()
+				.filter(
+					session => session.kind === "subagent" && (session.status === "active" || session.status === "failed"),
+				)
+				.map(session => ({
+					name: session.agent ?? session.label,
+					model: session.progress?.resolvedModel,
+					task: session.progress?.task,
+					tool: session.progress?.currentTool,
+					status:
+						session.status === "active"
+							? ("running" as const)
+							: session.status === "failed"
+								? ("error" as const)
+								: session.status === "completed"
+									? ("complete" as const)
+									: ("idle" as const),
+				}));
+			return {
+				...this.statusLine.sanctuarySnapshot(),
+				agents,
+				tasks: [
+					...this.todoPhases.flatMap(phase =>
+						phase.tasks
+							.filter(
+								task => task.status === "pending" || task.status === "in_progress" || task.status === "blocked",
+							)
+							.map(task => ({
+								label: task.content,
+								status:
+									task.status === "in_progress"
+										? ("running" as const)
+										: task.status === "blocked"
+											? ("blocked" as const)
+											: ("pending" as const),
+							})),
+					),
+					...agents
+						.filter(agent => agent.status === "error")
+						.map(agent => ({ label: agent.task ?? agent.name, status: "failed" as const })),
+				].slice(0, 3),
+				memory: cfgMemoryBackend.get(this.settings).toUpperCase(),
+			};
+		});
 
 		this.composer.setRuntimeChildren(
 			[

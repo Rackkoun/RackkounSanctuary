@@ -18,7 +18,7 @@ import {
 	type TUIOptions,
 	type ViewportSize,
 } from "../tui";
-import { wrapLiteralLine } from "../utils";
+import { Ellipsis, truncateToWidth, visibleWidth, wrapLiteralLine } from "../utils";
 import type { DescribeContext, NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
@@ -27,6 +27,10 @@ import type { WordCompletionMethod } from "./word-completion";
 import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
 import { type VersionUpdate, WelcomeComponent } from "./welcome";
 import { ensureThemeSync, getEditorTheme, theme } from "../theme/theme";
+import { SanctuarySidebar, type SanctuarySnapshot } from "./sanctuary-sidebar";
+import type { SanctuaryActivity } from "./sanctuary-sidebar";
+import type { SanctuaryLayout } from "./sanctuary-layout";
+import { matchesKey } from "../keys";
 
 const DOUBLE_INTERRUPT_MS = 500;
 // How long idle chrome must hold its height after a turn before it is treated as permanent.
@@ -231,6 +235,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	readonly #exit: (code: number) => void;
 	readonly #now: () => number;
 	#preferences: ComposerPreferences;
+	readonly #sanctuarySidebar = new SanctuarySidebar();
+	#sanctuaryEnabled = true;
+	#sanctuaryExpanded = false;
+	#sanctuaryActivity: SanctuaryActivity = "idle";
+	#sanctuarySnapshot: (() => SanctuarySnapshot) | undefined;
+	#removeSanctuaryInputListener: (() => void) | undefined;
 	#welcome: WelcomeComponent | undefined;
 	#version = "";
 	#versionUpdate: VersionUpdate | null = null;
@@ -351,6 +361,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			options.tuiOptions,
 		);
 		this.ui.setFrameProvider(this);
+		this.#removeSanctuaryInputListener = this.ui.addInputListener(data => {
+			if (!matchesKey(data, "ctrl+o") || this.ui.terminal.columns >= 58) return undefined;
+			this.#sanctuaryExpanded = !this.#sanctuaryExpanded;
+			this.ui.requestRender();
+			return { consume: true };
+		});
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
 		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
@@ -413,7 +429,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/** Compose the bounded mutable viewport and the next ordered history append. */
 	renderFrame(viewport: ViewportSize): TerminalFramePlan {
 		if (!this.#started || this.#stopped) return { viewport: [] };
-		const width = Math.max(1, viewport.columns);
+		const terminalWidth = Math.max(1, viewport.columns);
+		const layout = this.#sanctuarySidebar.layout(terminalWidth, this.#sanctuaryEnabled, this.#sanctuaryExpanded);
+		const width = layout.mainWidth;
 		const rows = Math.max(0, viewport.rows);
 		if (this.#resizeRetiredHeaderStart !== undefined) {
 			this.#retiredHeaderStart = this.#resizeRetiredHeaderStart;
@@ -434,7 +452,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				if (!this.#runtimeMounted && root === this.editor) this.#recordBootstrapEditorRows(rendered.length);
 				viewport.push(...rendered);
 			}
-			return { viewport: viewport.slice(-rows) };
+			return { viewport: this.#composeSanctuary(viewport.slice(-rows), terminalWidth, rows, layout) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -553,7 +571,31 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
 		const painted = this.#paintHoverBand(mutable, spans);
-		return { history, viewport: this.#linkHints?.hints.paint(painted, width) ?? painted };
+		const visible = this.#linkHints?.hints.paint(painted, width) ?? painted;
+		return { history, viewport: this.#composeSanctuary(visible, terminalWidth, rows, layout) };
+	}
+
+	#composeSanctuary(
+		mainRows: readonly string[],
+		terminalWidth: number,
+		rows: number,
+		layout: SanctuaryLayout,
+	): readonly string[] {
+		if (layout.mode === "hidden") return mainRows;
+		const snapshot = this.#sanctuarySnapshot?.();
+		const side = this.#sanctuarySidebar.render(layout.sidebarWidth, rows, layout.mode, {
+			...snapshot,
+			activity: snapshot?.activity === "verifying" ? "verifying" : this.#sanctuaryActivity,
+		});
+		const offset = Math.max(0, rows - mainRows.length);
+		return Array.from({ length: rows }, (_, index) => {
+			const main = mainRows[index - offset] ?? "";
+			const clipped = truncateToWidth(main, layout.mainWidth, Ellipsis.Omit);
+			const padding = " ".repeat(Math.max(0, layout.mainWidth - visibleWidth(clipped)));
+			const divider = theme.fg("border", "│");
+			const sideRow = side[index] ?? " ".repeat(layout.sidebarWidth);
+			return `${clipped}${padding}${divider}${sideRow}`;
+		});
 	}
 
 	/**
@@ -785,7 +827,9 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
 	renderResizeFrame(viewport: ViewportSize): readonly string[] {
 		if (!this.#started || this.#stopped) return [];
-		const width = Math.max(1, viewport.columns);
+		const terminalWidth = Math.max(1, viewport.columns);
+		const layout = this.#sanctuarySidebar.layout(terminalWidth, this.#sanctuaryEnabled, this.#sanctuaryExpanded);
+		const width = layout.mainWidth;
 		const rows = Math.max(0, viewport.rows);
 		const tail = this.#runtimeMounted
 			? this.#renderResizeTail(width, rows)
@@ -801,7 +845,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			header = this.#header.render(width);
 		}
 		const rendered = [...header, ...tail];
-		return rendered.length <= rows ? rendered : rendered.slice(rendered.length - rows);
+		const visible = rendered.length <= rows ? rendered : rendered.slice(rendered.length - rows);
+		return this.#composeSanctuary(visible, terminalWidth, rows, layout);
 	}
 
 	/** Replays committed presentation without changing logical retirement state. */
@@ -1203,6 +1248,20 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.ui.requestRender();
 	}
 
+	/** Enable or hide the Observatory and provide current session facts for each paint. */
+	setSanctuarySidebar(enabled: boolean, snapshot?: () => SanctuarySnapshot): void {
+		this.#sanctuaryEnabled = enabled;
+		this.#sanctuarySnapshot = snapshot;
+		this.ui.requestRender();
+	}
+
+	/** Set an Observatory state only when the corresponding agent lifecycle event occurs. */
+	setSanctuaryActivity(activity: SanctuaryActivity): void {
+		if (this.#sanctuaryActivity === activity) return;
+		this.#sanctuaryActivity = activity;
+		this.ui.requestRender();
+	}
+
 	/** Play or replay the welcome intro against the stable header render target. */
 	playWelcomeIntro(): void {
 		this.#welcome?.playIntro(() => this.ui.requestComponentRender(this.#header));
@@ -1221,6 +1280,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (!this.#started || this.#stopped || this.#transferred) return;
 		this.#welcome?.stopIntro();
 		this.#disposeStartupStatus();
+		this.#removeSanctuaryInputListener?.();
+		this.#removeSanctuaryInputListener = undefined;
 		this.ui.stop();
 		this.#stopped = true;
 	}
@@ -1262,6 +1323,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		if (this.#stopped) return;
 		this.#welcome?.stopIntro();
 		if (this.#started) this.ui.stop();
+		this.#removeSanctuaryInputListener?.();
+		this.#removeSanctuaryInputListener = undefined;
 		this.#stopped = true;
 		this.#exit(code);
 	}

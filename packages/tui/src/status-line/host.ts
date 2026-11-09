@@ -78,8 +78,10 @@ export interface StatusLineSession {
 	agent?: { state?: { tools?: readonly Pick<Tool, "name" | "description" | "parameters">[] }; tokenizer?: unknown };
 	skills?: readonly unknown[];
 	compactionSpeculation?: "idle" | "running" | "armed";
+	autoCompactionEnabled?: boolean;
 	sessionManager: {
 		getSessionName(): string | undefined;
+		getCwd?(): string;
 		getSessionId(): string;
 		getUsageStatistics(): {
 			input: number;
